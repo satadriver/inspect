@@ -1,0 +1,147 @@
+0	0	Echo Reply——回显应答（Ping应答）	x	 
+3	0	Network Unreachable——网络不可达	 	x
+3	1	Host Unreachable——主机不可达	 	x
+3	2	Protocol Unreachable——协议不可达	 	x
+3	3	Port Unreachable——端口不可达	 	x
+3	4	Fragmentation needed but no frag. bit set——需要进行分片但设置不分片比特	 	x
+3	5	Source routing failed——源站选路失败	 	x
+3	6	Destination network unknown——目的网络未知	 	x
+3	7	Destination host unknown——目的主机未知	 	x
+3	8	Source host isolated (obsolete)——源主机被隔离（作废不用）	 	x
+3	9	Destination network administratively prohibited——目的网络被强制禁止	 	x
+3	10	Destination host administratively prohibited——目的主机被强制禁止	 	x
+3	11	Network unreachable for TOS——由于服务类型TOS，网络不可达	 	x
+3	12	Host unreachable for TOS——由于服务类型TOS，主机不可达	 	x
+3	13	Communication administratively prohibited by filtering——由于过滤，通信被强制禁止	 	x
+3	14	Host precedence violation——主机越权	 	x
+3	15	Precedence cutoff in effect——优先中止生效	 	x
+4	0	Source quench——源端被关闭（基本流控制）	 	 
+5	0	Redirect for network——对网络重定向	 	 
+5	1	Redirect for host——对主机重定向	 	 
+5	2	Redirect for TOS and network——对服务类型和网络重定向	 	 
+5	3	Redirect for TOS and host——对服务类型和主机重定向	 	 
+8	0	Echo request——回显请求（Ping请求）	x	 
+9	0	Router advertisement——路由器通告	 	 
+10	0	Route solicitation——路由器请求	 	 
+11	0	TTL equals 0 during transit——传输期间生存时间为0	 	x
+11	1	TTL equals 0 during reassembly——在数据报组装期间生存时间为0	 	x
+12	0	IP header bad (catchall error)——坏的IP首部（包括各种差错）	 	x
+12	1	Required options missing——缺少必需的选项	 	x
+13	0	Timestamp request (obsolete)——时间戳请求（作废不用）	x	 
+14	 	Timestamp reply (obsolete)——时间戳应答（作废不用）	x	 
+15	0	Information request (obsolete)——信息请求（作废不用）	x	 
+16	0	Information reply (obsolete)——信息应答（作废不用）	x	 
+17	0	Address mask request——地址掩码请求	x	 
+18	0	Address mask reply——地址掩码应答
+
+
+WFP的每个固定过滤层都挂载到TCPIP协议栈对应层，可以简单理解是在TCPIP栈的每层HOOK了一个“钩子函数”。
+但是这个 ”钩子函数“ 还可以运行许多 ”子钩子函数“，从而构成一个丰富复杂的WFP过滤系统。
+
+WFP的每个固定层包含了许多固定过滤点，也可以说成是过滤子层，简单的说，就是每层中可以设置许多不同类型的固定的 ”子钩子函数“。
+比如 Stream Data 层，可以设置 FWPM_LAYER_STREAM_V4（V6） 类型的钩子函数。
+(V6是IP协议的第6版本，就是 IPV6，每个固定过滤点都有对应的V6版本，下文为了简单省去 V6 ）。
+这样应用层调用send，sendto等函数发送的数据内容就会在 FWPM_LAYER_STREAM_V4设置的钩子函数中截获到。
+同样从物理网络层接收到的数据经过层层剥离最后只剩下应用层数据内容，也会进入 FWPM_LAYER_STREAM_V4 设置的钩子函数中。
+
+再比如ALE层，这一层包含的固定过滤点有点多。
+比如应用层程序调用 bind函数来绑定到本地地址，WFP的ALE层就会对应有两个 固定过滤点调用：
+1， FWPM_LAYER_ALE_BIND_REDIRECT_V4，这个是 在绑定前，允许你自己修改绑定的本地地址，在win7以上系统支持。
+2， FWPM_LAYER_ALE_RESOURCE_ASSIGNMENT_V4， 分配本地资源认证，
+       就是你可以允许绑定，或者不允许，不允许的话，bind返回失败。
+
+再如connect函数调用，也会对应两个固定过滤点：
+1， FWPM_LAYER_ALE_CONNECT_REDIRECT_V4，在连接前，允许你修改连接的目的地址，
+      这个功能非常适合用来做代理，win7以上支持。
+2，FWPM_LAYER_ALE_AUTH_CONNECT_V4， 连接认证，同上，不允许的话，connect函数失败。
+
+listen，accept等函数都有对应的ALE固定过滤点，这里就不一一列举。
+
+FWPM_LAYER_ALE_CONNECT_REDIRECT_V4 这个过滤点，对我们实现代理服务器非常有用。
+就是我们可以在这个过滤点的钩子函数中，把连接的目的地址设置成我们服务器的IP地址，
+这样应用层所有的网络请求都会转发到我们的代理服务器。这就达到了代理的效果。
+自然这里还需要解决一个技术问题：就是代理服务器还需要知道我们最终连接的哪个IP地址。
+可以借鉴 SOCKS5 代理协议的做法，在真正传输数据前，先告诉代理服务器我们需要连接的IP地址。
+
+但是在FWPM_LAYER_ALE_CONNECT_REDIRECT_V4 钩子函数中还没真正跟代理服务器建立起连接，
+于是先把传输的目的IP地址等信息记录下来。再挂载FWPM_LAYER_STREAM_V4 过滤点。
+对于TCP，第一个发送数据包时候，在头部增加一段数据记录目的IP等信息。这样代理服务器端接收到第一个数据包就能知道朝哪里连接。
+（然而这种做法似乎对连接建立后，服务端首先发送数据包给客户端的TCP连接会有些问题，
+    具体可以再想其他解决办法，估计还是没使用LSP方案解决起来轻松）
+对于 UDP，则每个数据包前增加目的IP等信息，这样代理服务器端对每个UDP数据包都能知道朝哪发送。
+
+当然FWPM_LAYER_ALE_CONNECT_REDIRECT_V4 的代理功能在应用层使用 LSP一样能实现，只是这样让你有更多的选择。
+至于内核层发送的数据包要做代理转发，比如使用TDI或者WSK套接字发送的数据包，
+这时候你就只能使用FWPM_LAYER_ALE_CONNECT_REDIRECT_V4的方案来解决了。
+
+
+我们再来看看TCP数据在整个协议栈传输流动的时候，WFP在其中充当的过滤点角色，
+这样我们更能了解WFP的作用。
+
+TCP : 分为 client ,  server
+
+首先连接建立过程：
+client端调用 socket， connect 建立连接，
+server调用 socket， bind， listen， accept 等函数接收客户端连接。
+
+client：
+     bind： FWPM_LAYER_ALE_BIND_REDIRECT_V4  这个支持win7以上系统，（不管有没有显式调用bind函数，绑定操作都会发生）
+     bind： FWPM_LAYER_ALE_RESOURCE_ASSIGNMENT_V4
+     connect: FWPM_LAYER_ALE_CONNECT_REDIRECT_V4 ， win7以上系统
+     connect: FWPM_LAYER_ALE_AUTH_CONNECT_V4
+     接着发送SYN数据包，
+     SYN: FWPM_LAYER_OUTBOUND_TRANSPORT_V4 ， SYN进入到传输层
+     SYN: FWPM_LAYER_OUTBOUND_IPPACKET_V4， SYN进入到IP层
+     接收到 SYN_ACK数据包，
+     SYN-ACK: FWPM_LAYER_INBOUND_IPPACKET_V4， 首先进入IP层
+     SYN-ACK: FWPM_LAYER_INBOUND_TRANSPORT_V4 ，进入到传输层
+     FWPM_LAYER_ALE_FLOW_ESTABLISHED_V4，到达ALE层，内核建立起连接，同时回复ACK包给服务端。
+     ACK: FWPM_LAYER_OUTBOUND_TRANSPORT_V4， 回复的ACK包进入传输层
+     ACK: FWPM_LAYER_OUTBOUND_IPPACKET_V4， 回复的包进入IP层
+ 
+以上就是客户端在建立连接时候，WFP能挂载的所有挂载点和流程。
+以下是服务端端：
+
+server：
+     bind： FWPM_LAYER_ALE_BIND_REDIRECT_V4  这个支持win7以上系统
+     bind： FWPM_LAYER_ALE_RESOURCE_ASSIGNMENT_V4
+     listen: FWPM_LAYER_ALE_AUTH_LISTEN_V4， listen函数认证
+     接下来就是accept开始接收客户端的请求，首先接收到的是SYN数据包，
+     SYN: FWPM_LAYER_INBOUND_IPPACKET_V4， SYN包首先进入IP层
+     SYN: FWPM_LAYER_INBOUND_TRANSPORT_V4 ， SYN包进入传输层
+     SYN: FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4， SYN进入ALE层，确认建立连接，同时给客户端回复SYN-ACK数据包。
+     SYN-ACK: FWPM_LAYER_OUTBOUND_TRANSPORT_V4，回复的SYN-ACK数据包进入传输层
+     SYN-ACK: FWPM_LAYER_OUTBOUND_IPPACKET_V4， 回复的SYN-ACK数据包进入IP层
+     然后就开始接收客户端发来的最后一个ACK数据包，
+     ACK: FWPM_LAYER_INBOUND_IPPACKET_V4， ACK包首先进入IP层
+     ACK: FWPM_LAYER_INBOUND_TRANSPORT_V4 ， ACK进入传输层
+     FWPM_LAYER_ALE_FLOW_ESTABLISHED_V4， ACK进入ALE层，这个时候就已经建立起了连接，
+     accept函数返回，接收到了新的客户端连接的socket。
+ 
+     以上是服务端和客户端建立三次握手连接的流程。
+ 
+     当客户端连接服务端一个不在侦听的端口的情况下：下边是服务端的流程
+     SYN: FWPM_LAYER_INBOUND_IPPACKET_V， 进入IP层
+     SYN: FWPM_LAYER_INBOUND_TRANSPORT_V4_DISCARD，
+             进入传输层，但是这个是时候，是进入WFP传输层的丢弃过滤点  , 同时给客户端回复RST数据包。
+     RST: FWPM_LAYER_OUTBOUND_TRANSPORT_V4, 
+     RST: FWPM_LAYER_OUTBOUND_IPPACKET_V4
+ 
+     接下来就是client和server端的数据传输：
+     send（发送数据包）：
+          data：FWPM_LAYER_STREAM_V4， 发送数据到 Stream DATA层
+          TCP:   FWPM_LAYER_OUTBOUND_TRANSPORT_V4， 到达传输层
+           IP:    FWPM_LAYER_OUTBOUND_IPPACKET_V4， 达到IP层。
+    recv（接收数据包）：
+           把上边的过程反过来。
+
+     服务端还要处理一种情况，就是当最初的连接授权发生变化的时候， 数据包还会进入到   
+          FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4，  认证正确      
+          FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4_DISCARD,   没通过认证。
+ 至于这个连接授权发生变化的情况，请看如下链接，这里就不再继续，
+   https://msdn.microsoft.com/en-us/library/windows/desktop/bb613462(v=vs.85).aspx
+
+同样，UDP的WFP流程请看如下链接，这里也不再继续。
+ https://msdn.microsoft.com/en-us/library/bb451831(v=vs.85).aspx，
+
+从上边的例子，我们可以看到，WFP的过滤点，几乎是挂载到整个通讯的方方面面，可以说无处不在
